@@ -35,6 +35,8 @@ class RDTLayer(object):
     lastSent = 0
     sentData = []
     receivedData = []
+    out_of_order_buffer = {}
+    countSegmentTimeouts = 0
     # Add items as needed
 
     # ################################################################################################################ #
@@ -54,6 +56,7 @@ class RDTLayer(object):
         self.lastSent = 0
         self.sentData = []
         self.receivedData = []
+        self.time_sent = None
         # Add items as needed
 
     # ################################################################################################################ #
@@ -120,8 +123,9 @@ class RDTLayer(object):
     # ################################################################################################################ #
     def processData(self):
         self.currentIteration += 1
-        self.processSend()
+
         self.processReceiveAndSendRespond()
+        self.processSend()
 
     # ################################################################################################################ #
     # processSend()                                                                                                    #
@@ -133,9 +137,18 @@ class RDTLayer(object):
     # ################################################################################################################ #
     def processSend(self):
         segmentSend = Segment()
+        TIMEOUT = 5
 
         unacked_received_packets = self.receivedData[self.lastAcked + 1:]
         print("Length of unacknowledged received packets list: ", len(unacked_received_packets))
+
+        for segment in self.sentData:
+            # If the segment has been sent previously but not acknowledged
+            if self.currentIteration - segment.time_sent > TIMEOUT:
+                print("Timeout! Resending segment: ", segment.to_string())
+                self.countSegmentTimeouts += 1
+                self.sendChannel.send(segment)
+                segment.time_sent = self.currentIteration  # Record the time when the segment was re-sent
 
         # ############################################################################################################ #
         while self.lastSent - self.lastAcked < self.FLOW_CONTROL_WIN_SIZE and self.lastSent < len(
@@ -150,6 +163,7 @@ class RDTLayer(object):
             self.sendChannel.send(segmentSend)
             self.lastSent += 1
             self.sentData.append(segmentSend)
+            segmentSend.time_sent = self.currentIteration
             # If there's no more data to send, don't try to create a new segment.
         unacked_sent_packets = self.sentData[self.lastAcked + 1:]
         print("Length of unacknowledged sent packets list: ", len(unacked_sent_packets))
@@ -170,12 +184,17 @@ class RDTLayer(object):
                 self.lastAcked = int(segment.acknum)
             elif segment.acknum == -1 and int(segment.seqnum) == len(self.receivedData):
                 self.receivedData.append(segment)
+                while len(self.receivedData) in self.out_of_order_buffer:
+                    buffered_segment = self.out_of_order_buffer.pop(len(self.receivedData))
+                    self.receivedData.append(buffered_segment)
                 acknum = str(len(self.receivedData))
                 segmentAck = Segment()
                 segmentAck.setAck(acknum)
                 print("Sending ack: ", segmentAck.to_string())
                 self.sendChannel.send(segmentAck)
-
+            elif segment.acknum == -1 and int(segment.seqnum) > len(self.receivedData):
+                # Out of order segment, store it in buffer
+                self.out_of_order_buffer[int(segment.seqnum)] = segment
 
 
         # ############################################################################################################ #
